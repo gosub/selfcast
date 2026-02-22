@@ -619,6 +619,49 @@ def feed_main(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Follow mode (add a feed to OPML)
+# ---------------------------------------------------------------------------
+
+def follow_main(args) -> None:
+    feed_url = args.feed_url
+    opml_path = args.opml_file
+
+    # Fetch the feed to get its title
+    print(f"Fetching {feed_url} ...")
+    feed = feedparser.parse(feed_url)
+    if feed.bozo and not feed.entries:
+        sys.exit(f"Error: could not parse feed at {feed_url}")
+    title = args.title or feed.feed.get("title", feed_url)
+    html_url = feed.feed.get("link", "")
+
+    if os.path.exists(opml_path):
+        tree = ET.parse(opml_path)
+        root = tree.getroot()
+        body = root.find("body")
+        # Check for duplicates
+        for outline in body.iter("outline"):
+            if outline.get("xmlUrl") == feed_url:
+                print(f"Feed already exists in {opml_path}: {title}")
+                return
+    else:
+        root = ET.Element("opml", version="2.0")
+        head = ET.SubElement(root, "head")
+        ET.SubElement(head, "title").text = "Selfcast feeds"
+        body = ET.SubElement(root, "body")
+        tree = ET.ElementTree(root)
+
+    outline = ET.SubElement(body, "outline",
+                            text=title, title=title,
+                            xmlUrl=feed_url)
+    if html_url:
+        outline.set("htmlUrl", html_url)
+
+    ET.indent(tree, space="  ")
+    tree.write(opml_path, encoding="unicode", xml_declaration=True)
+    print(f"Added \"{title}\" to {opml_path} ({len(feed.entries)} entries in feed)")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -672,12 +715,26 @@ def main() -> None:
         help="Save pipeline intermediate text files for each article"
     )
 
+    # --- follow subcommand ---
+    follow_parser = subparsers.add_parser("follow", help="Add a feed to an OPML file")
+    follow_parser.add_argument("feed_url", help="RSS/Atom feed URL to follow")
+    follow_parser.add_argument(
+        "--opml-file", default="feeds.opml",
+        help="OPML file to add the feed to (default: feeds.opml)"
+    )
+    follow_parser.add_argument(
+        "--title", default=None,
+        help="Override the feed title (default: auto-detected from feed)"
+    )
+
     args = parser.parse_args()
 
     if args.command == "url":
         url_main(args)
     elif args.command == "feed":
         feed_main(args)
+    elif args.command == "follow":
+        follow_main(args)
 
 
 if __name__ == "__main__":
