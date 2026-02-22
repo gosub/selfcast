@@ -13,12 +13,17 @@ import soundfile as sf
 import trafilatura
 from qwen_tts import Qwen3TTSModel
 
-PROMPT_PREFIX = """\
-You are a professional text extractor. Extract the readable text from the following html page, after the cut. Do not extract headers, menu, footers, only the main text of the page. Remember that the text will be passed to a text-to-speech engine, and the final output will be read to the user, who wants to know the content of the html page as if he was reading a magazine article. Only write the extracted text, no preable, no 'ok, here is the content of the page'
+SYSTEM_PROMPT = """\
+You are a professional editor preparing text for a text-to-speech engine. \
+The user will provide article text extracted from a webpage. Your job is to \
+rewrite it so it sounds natural when read aloud, like a magazine article.
 
-------------------
-
-"""
+Rules:
+- Remove reference markers like [1], [2], [citation needed], etc.
+- Spell out abbreviations on first use (e.g. "GPL" -> "G P L").
+- Convert bullet points and numbered lists into flowing prose.
+- Remove any leftover navigation text, headers, or footers.
+- Do not add any preamble like "Here is the text" — output ONLY the rewritten article."""
 
 LLAMA_SERVER_CMD = [
     "llama-server",
@@ -44,7 +49,9 @@ def download_html(url: str) -> str:
     print(f"Downloading {url} ...")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req) as r:
-        return r.read().decode("utf-8", errors="replace")
+        html = r.read().decode("utf-8", errors="replace")
+    print(f"HTML size: {len(html):,} chars")
+    return html
 
 
 def clean_html(html: str) -> str:
@@ -52,6 +59,7 @@ def clean_html(html: str) -> str:
     text = trafilatura.extract(html, include_comments=False)
     if not text:
         return html  # fallback to raw HTML
+    print(f"After trafilatura: {len(text):,} chars ({100 - len(text) / len(html) * 100:.0f}% reduction)")
     return text
 
 
@@ -82,7 +90,10 @@ def extract_text(html: str) -> str:
         print("Extracting readable text (LLM) ...")
         payload = json.dumps({
             "model": "gpt-oss-20b",
-            "messages": [{"role": "user", "content": PROMPT_PREFIX + html}],
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": html},
+            ],
         }).encode()
         req = urllib.request.Request(
             f"{LLAMA_SERVER_URL}/v1/chat/completions",
@@ -146,6 +157,7 @@ def generate_tts(text: str, speaker: str, language: str, wav_path: str) -> None:
     all_audio: list[np.ndarray] = []
     sr = None
 
+    tts_start = time.monotonic()
     for i, chunk in enumerate(chunks):
         print(f"  Generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars) ...")
         wavs, chunk_sr = model.generate_custom_voice(
@@ -160,9 +172,10 @@ def generate_tts(text: str, speaker: str, language: str, wav_path: str) -> None:
             silence_samples = int(sr * SILENCE_BETWEEN_CHUNKS)
             all_audio.append(np.zeros(silence_samples, dtype=wavs[0].dtype))
 
+    tts_elapsed = time.monotonic() - tts_start
     combined = np.concatenate(all_audio)
     sf.write(wav_path, combined, sr)
-    print(f"WAV written (sample rate: {sr}, {len(combined) / sr:.1f}s)")
+    print(f"WAV written (sample rate: {sr}, {len(combined) / sr:.1f}s, TTS took {tts_elapsed:.0f}s)")
 
 
 def main() -> None:
