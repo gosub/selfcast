@@ -30,9 +30,10 @@ Rules:
 
 PREAMBLE_SYSTEM_PROMPT = """\
 You generate a short spoken introduction for an audiobook rendering of a webpage. \
-Given the article text and its URL, produce a single line in this exact format:
+The user will provide article metadata (title, author, site, URL) and a text snippet. \
+Use the metadata to produce a single line in this exact format:
 Selfcast rendering of: <title>. By: <author>.
-If you cannot identify the author, use: From: <website domain>.
+If no author is available, use: From: <website or site name>.
 Output ONLY this single line, nothing else."""
 
 LLAMA_SERVER_CMD = [
@@ -64,13 +65,21 @@ def download_html(url: str) -> str:
     return html
 
 
-def clean_html(html: str) -> str:
-    """Strip boilerplate, scripts, styles, nav — keep article text."""
+def clean_html(html: str) -> tuple[str, dict]:
+    """Strip boilerplate, scripts, styles, nav — keep article text and metadata."""
     text = trafilatura.extract(html, include_comments=False)
     if not text:
-        return html  # fallback to raw HTML
+        text = html  # fallback to raw HTML
+
+    meta = trafilatura.extract_metadata(html)
+    metadata = {
+        "title": meta.title if meta else None,
+        "author": meta.author if meta else None,
+        "sitename": meta.sitename if meta else None,
+        "url": meta.url if meta else None,
+    }
     print(f"After trafilatura: {len(text):,} chars ({100 - len(text) / len(html) * 100:.0f}% reduction)")
-    return text
+    return text, metadata
 
 
 def llama_query(messages: list[dict]) -> str:
@@ -93,17 +102,21 @@ def llama_query(messages: list[dict]) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
-def generate_preamble(text: str, url: str) -> str:
-    """Ask the LLM to produce a short spoken intro line."""
+def generate_preamble(text: str, metadata: dict) -> str:
+    """Ask the LLM to produce a short spoken intro line using metadata."""
     print("Generating preamble (LLM) ...")
-    snippet = text[:500] + f"\n\nURL: {url}"
+    meta_lines = []
+    for key in ("title", "author", "sitename", "url"):
+        if metadata.get(key):
+            meta_lines.append(f"{key}: {metadata[key]}")
+    user_content = "\n".join(meta_lines) + "\n\n" + text[:500]
     return llama_query([
         {"role": "system", "content": PREAMBLE_SYSTEM_PROMPT},
-        {"role": "user", "content": snippet},
+        {"role": "user", "content": user_content},
     ])
 
 
-def extract_text(html: str, url: str) -> tuple[str, str]:
+def extract_text(html: str, metadata: dict) -> tuple[str, str]:
     """Start llama-server, query it for preamble + text extraction, then shut it down."""
     print("Starting llama-server ...")
     proc = subprocess.Popen(
@@ -127,7 +140,7 @@ def extract_text(html: str, url: str) -> tuple[str, str]:
         if not ready:
             raise RuntimeError("llama-server failed to become ready within 120s")
 
-        preamble = generate_preamble(html, url)
+        preamble = generate_preamble(html, metadata)
         print(f"Preamble: {preamble}")
 
         print("Extracting readable text (LLM) ...")
@@ -245,8 +258,9 @@ def main() -> None:
     args = parser.parse_args()
 
     raw_html = download_html(args.url)
-    cleaned = clean_html(raw_html)
-    preamble, text = extract_text(cleaned, args.url)
+    cleaned, metadata = clean_html(raw_html)
+    metadata.setdefault("url", args.url)
+    preamble, text = extract_text(cleaned, metadata)
 
     if not text:
         sys.exit("Error: LLM returned empty text.")
