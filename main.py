@@ -6,8 +6,11 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+
+import numpy as np
 import torch
 import soundfile as sf
+import trafilatura
 from qwen_tts import Qwen3TTSModel
 
 PROMPT_PREFIX = """\
@@ -31,12 +34,25 @@ LLAMA_SERVER_URL = "http://127.0.0.1:8192"
 
 SPEAKERS = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee"]
 
+# Max characters per TTS chunk (~3000 chars ≈ 20-25K tokens for Qwen3-TTS)
+TTS_CHUNK_MAX_CHARS = 3000
+# Seconds of silence between TTS chunks
+SILENCE_BETWEEN_CHUNKS = 2.0
+
 
 def download_html(url: str) -> str:
     print(f"Downloading {url} ...")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req) as r:
         return r.read().decode("utf-8", errors="replace")
+
+
+def clean_html(html: str) -> str:
+    """Strip boilerplate, scripts, styles, nav — keep article text."""
+    text = trafilatura.extract(html, include_comments=False)
+    if not text:
+        return html  # fallback to raw HTML
+    return text
 
 
 def extract_text(html: str) -> str:
@@ -85,6 +101,36 @@ def extract_text(html: str) -> str:
         proc.wait()
 
 
+def chunk_text(text: str, max_chars: int = TTS_CHUNK_MAX_CHARS) -> list[str]:
+    """Split text into chunks by paragraphs, each up to max_chars."""
+    paragraphs = text.split("\n\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        # If adding this paragraph would exceed the limit, flush current chunk
+        if current and current_len + len(para) + 2 > max_chars:
+            chunks.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(para)
+        current_len += len(para) + 2  # +2 for "\n\n" separator
+
+    if current:
+        chunks.append("\n\n".join(current))
+
+    # Add "Part X of Y" prefix to each chunk
+    total = len(chunks)
+    if total > 1:
+        chunks = [f"Part {i + 1} of {total}. {chunk}" for i, chunk in enumerate(chunks)]
+
+    return chunks
+
+
 def generate_tts(text: str, speaker: str, language: str, wav_path: str) -> None:
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"TTS: device={device}, speaker={speaker}, language={language}")
@@ -93,9 +139,30 @@ def generate_tts(text: str, speaker: str, language: str, wav_path: str) -> None:
         device_map=device,
         dtype=torch.bfloat16,
     )
-    wavs, sr = model.generate_custom_voice(text=text, language=language, speaker=speaker)
-    sf.write(wav_path, wavs[0], sr)
-    print(f"WAV written (sample rate: {sr})")
+
+    chunks = chunk_text(text)
+    print(f"TTS: {len(chunks)} chunk(s) to generate")
+
+    all_audio: list[np.ndarray] = []
+    sr = None
+
+    for i, chunk in enumerate(chunks):
+        print(f"  Generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars) ...")
+        wavs, chunk_sr = model.generate_custom_voice(
+            text=chunk, language=language, speaker=speaker,
+        )
+        if sr is None:
+            sr = chunk_sr
+        all_audio.append(wavs[0])
+
+        # Insert silence between chunks (not after the last one)
+        if i < len(chunks) - 1:
+            silence_samples = int(sr * SILENCE_BETWEEN_CHUNKS)
+            all_audio.append(np.zeros(silence_samples, dtype=wavs[0].dtype))
+
+    combined = np.concatenate(all_audio)
+    sf.write(wav_path, combined, sr)
+    print(f"WAV written (sample rate: {sr}, {len(combined) / sr:.1f}s)")
 
 
 def main() -> None:
@@ -118,6 +185,7 @@ def main() -> None:
     args = parser.parse_args()
 
     html = download_html(args.url)
+    html = clean_html(html)
     text = extract_text(html)
 
     if not text:

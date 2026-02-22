@@ -5,9 +5,11 @@ Convert webpages to audiobooks using fully local LLM and TTS inference. No cloud
 The pipeline:
 
 1. Downloads a webpage
-2. Extracts readable text using a local LLM ([llama.cpp](https://github.com/ggml-org/llama.cpp) + [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF))
-3. Generates speech using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) on Apple MPS
-4. Encodes the result to MP3 via ffmpeg
+2. Pre-cleans HTML with [trafilatura](https://github.com/adbar/trafilatura) to strip boilerplate (nav, scripts, styles, footers), reducing tokens by 70-90%
+3. Extracts readable text using a local LLM ([llama.cpp](https://github.com/ggml-org/llama.cpp) + [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF))
+4. Chunks the text for TTS (~3000 chars per chunk) with "Part X of Y" announcements and silence gaps between chunks
+5. Generates speech using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) on Apple MPS
+6. Encodes the result to MP3 via ffmpeg
 
 ## Requirements
 
@@ -60,4 +62,4 @@ uv run main.py https://example.com/article article.mp3 --speaker Vivian --langua
 
 ## How it works
 
-The script starts a temporary `llama-server` instance to extract article text from the raw HTML, then shuts it down to free memory before loading the TTS model. Both models run on Apple MPS (Metal Performance Shaders) for GPU-accelerated inference. The two models are too large to fit in memory simultaneously on 16 GB, hence the sequential approach.
+The script first uses trafilatura to strip boilerplate from the HTML, drastically reducing the token count so that even large pages (e.g. Wikipedia) fit within the LLM's 32K context window. It then starts a temporary `llama-server` instance to extract article text, and shuts it down to free memory before loading the TTS model. Long texts are automatically split into chunks (~3000 chars each) with "Part X of Y" prefixes and 2-second silence gaps between them. Both models run on Apple MPS (Metal Performance Shaders) for GPU-accelerated inference. The two models are too large to fit in memory simultaneously on 16 GB, hence the sequential approach.
