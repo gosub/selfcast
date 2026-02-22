@@ -14,16 +14,19 @@ import trafilatura
 from qwen_tts import Qwen3TTSModel
 
 SYSTEM_PROMPT = """\
-You are a professional editor preparing text for a text-to-speech engine. \
-The user will provide article text extracted from a webpage. Your job is to \
-rewrite it so it sounds natural when read aloud, like a magazine article.
+You are preparing article text for a text-to-speech engine. \
+The user will provide article text extracted from a webpage. \
+Keep the original text as faithful as possible — only make minimal edits \
+so it renders well in audio.
 
 Rules:
+- Preserve the original wording, structure, and meaning.
 - Remove reference markers like [1], [2], [citation needed], etc.
 - Spell out abbreviations on first use (e.g. "GPL" -> "G P L").
 - Convert bullet points and numbered lists into flowing prose.
 - Remove any leftover navigation text, headers, or footers.
-- Do not add any preamble like "Here is the text" — output ONLY the rewritten article."""
+- Do NOT summarize, paraphrase, or rewrite sentences unless necessary for audio clarity.
+- Do not add any preamble like "Here is the text" — output ONLY the cleaned article."""
 
 PREAMBLE_SYSTEM_PROMPT = """\
 You generate a short spoken introduction for an audiobook rendering of a webpage. \
