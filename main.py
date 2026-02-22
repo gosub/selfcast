@@ -24,7 +24,6 @@ LLAMA_SERVER_CMD = [
     "-c", "32768",
     "--jinja",
     "--no-mmap",
-    "--offline",
     "--port", "8192",
 ]
 
