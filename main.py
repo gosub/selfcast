@@ -25,6 +25,13 @@ Rules:
 - Remove any leftover navigation text, headers, or footers.
 - Do not add any preamble like "Here is the text" — output ONLY the rewritten article."""
 
+PREAMBLE_SYSTEM_PROMPT = """\
+You generate a short spoken introduction for an audiobook rendering of a webpage. \
+Given the article text and its URL, produce a single line in this exact format:
+Selfcast rendering of: <title>. By: <author>.
+If you cannot identify the author, use: From: <website domain>.
+Output ONLY this single line, nothing else."""
+
 LLAMA_SERVER_CMD = [
     "llama-server",
     "-hf", "ggml-org/gpt-oss-20b-GGUF",
@@ -63,8 +70,38 @@ def clean_html(html: str) -> str:
     return text
 
 
-def extract_text(html: str) -> str:
-    """Start llama-server, query it to extract text from HTML, then shut it down."""
+def llama_query(messages: list[dict]) -> str:
+    """Send a chat completion request to the already-running llama-server."""
+    payload = json.dumps({
+        "model": "gpt-oss-20b",
+        "messages": messages,
+    }).encode()
+    req = urllib.request.Request(
+        f"{LLAMA_SERVER_URL}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"llama-server returned {e.code}: {body}") from e
+    return data["choices"][0]["message"]["content"].strip()
+
+
+def generate_preamble(text: str, url: str) -> str:
+    """Ask the LLM to produce a short spoken intro line."""
+    print("Generating preamble (LLM) ...")
+    snippet = text[:500] + f"\n\nURL: {url}"
+    return llama_query([
+        {"role": "system", "content": PREAMBLE_SYSTEM_PROMPT},
+        {"role": "user", "content": snippet},
+    ])
+
+
+def extract_text(html: str, url: str) -> tuple[str, str]:
+    """Start llama-server, query it for preamble + text extraction, then shut it down."""
     print("Starting llama-server ...")
     proc = subprocess.Popen(
         LLAMA_SERVER_CMD,
@@ -87,26 +124,15 @@ def extract_text(html: str) -> str:
         if not ready:
             raise RuntimeError("llama-server failed to become ready within 120s")
 
+        preamble = generate_preamble(html, url)
+        print(f"Preamble: {preamble}")
+
         print("Extracting readable text (LLM) ...")
-        payload = json.dumps({
-            "model": "gpt-oss-20b",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": html},
-            ],
-        }).encode()
-        req = urllib.request.Request(
-            f"{LLAMA_SERVER_URL}/v1/chat/completions",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req) as resp:
-                data = json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode(errors="replace")
-            raise RuntimeError(f"llama-server returned {e.code}: {body}") from e
-        return data["choices"][0]["message"]["content"].strip()
+        text = llama_query([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": html},
+        ])
+        return preamble, text
     finally:
         proc.terminate()
         proc.wait()
@@ -142,7 +168,8 @@ def chunk_text(text: str, max_chars: int = TTS_CHUNK_MAX_CHARS) -> list[str]:
     return chunks
 
 
-def generate_tts(text: str, speaker: str, language: str, wav_path: str) -> None:
+def generate_tts(text: str, speaker: str, language: str, wav_path: str,
+                  preamble: str | None = None) -> None:
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"TTS: device={device}, speaker={speaker}, language={language}")
     model = Qwen3TTSModel.from_pretrained(
@@ -158,6 +185,19 @@ def generate_tts(text: str, speaker: str, language: str, wav_path: str) -> None:
     sr = None
 
     tts_start = time.monotonic()
+
+    # Generate preamble as chunk 0
+    if preamble:
+        print(f"  Generating preamble ({len(preamble)} chars) ...")
+        wavs, chunk_sr = model.generate_custom_voice(
+            text=preamble, language=language, speaker=speaker,
+        )
+        if sr is None:
+            sr = chunk_sr
+        all_audio.append(wavs[0])
+        silence_samples = int(sr * SILENCE_BETWEEN_CHUNKS)
+        all_audio.append(np.zeros(silence_samples, dtype=wavs[0].dtype))
+
     for i, chunk in enumerate(chunks):
         print(f"  Generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars) ...")
         wavs, chunk_sr = model.generate_custom_voice(
@@ -195,20 +235,32 @@ def main() -> None:
         "--language", default="Auto",
         help="Language for TTS, e.g. English, Italian, Auto (default: Auto)"
     )
+    parser.add_argument(
+        "--save-text", action="store_true",
+        help="Save TTS input text to a .txt file alongside the output"
+    )
     args = parser.parse_args()
 
     html = download_html(args.url)
     html = clean_html(html)
-    text = extract_text(html)
+    preamble, text = extract_text(html, args.url)
 
     if not text:
         sys.exit("Error: LLM returned empty text.")
+
+    if args.save_text:
+        txt_path = os.path.splitext(args.output)[0] + ".txt"
+        with open(txt_path, "w") as f:
+            if preamble:
+                f.write(preamble + "\n\n")
+            f.write(text)
+        print(f"TTS text saved to {txt_path}")
 
     fd, wav_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     success = False
     try:
-        generate_tts(text, args.speaker, args.language, wav_path)
+        generate_tts(text, args.speaker, args.language, wav_path, preamble=preamble)
         print(f"Encoding {args.output} ...")
         subprocess.run(
             ["ffmpeg", "-y", "-i", wav_path, "-b:a", "128k", args.output],
