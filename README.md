@@ -72,6 +72,7 @@ Tested on a MacBook Air M4, 16 GB RAM.
 |---|---|---|---|---|---|---|
 | [Guido van Rossum](https://en.wikipedia.org/wiki/Guido_van_Rossum) | 178K chars | 13K chars | 93% | 2 | 6:09 | ~19 min |
 | [Python (programming language)](https://en.wikipedia.org/wiki/Python_(programming_language)) | 604K chars | 77K chars | 87% | 2 | 5:23 | ~19 min |
+| [How to Do Great Work](https://paulgraham.com/greatwork.html) | 80K chars | 67K chars | 16% | 3 | 8:01 | ~27 min |
 
 ## License
 
