@@ -34,7 +34,7 @@ On first run the LLM and TTS models will be downloaded from Hugging Face automat
 
 ## Usage
 
-There are two modes: **url** (convert a single webpage) and **feed** (batch-process RSS/Atom feeds).
+There are three subcommands: **url** (convert a single webpage), **follow** (subscribe to a feed), and **feed** (batch-process feeds).
 
 ### Single URL mode
 
@@ -62,6 +62,30 @@ uv run main.py url https://example.com/article article.mp3 --save-text
 | `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
 | `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
 | `--save-text` | off | Save raw HTML, trafilatura output, and LLM output as separate files |
+
+### Follow mode
+
+Subscribe to a new RSS/Atom feed by adding it to an OPML file. The feed title is auto-detected.
+
+```bash
+uv run main.py follow <feed-url> [--opml-file feeds.opml] [--title TITLE]
+```
+
+Examples:
+
+```bash
+# Add a feed (creates feeds.opml if it doesn't exist)
+uv run main.py follow https://example.com/feed.xml
+
+# Custom OPML file and title override
+uv run main.py follow https://example.com/feed.xml --opml-file my-feeds.opml --title "My Blog"
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `feed_url` | (required) | RSS/Atom feed URL to subscribe to |
+| `--opml-file` | `feeds.opml` | OPML file to add the feed to (created if missing) |
+| `--title` | auto-detected | Override the feed title |
 
 ### Feed mode
 
