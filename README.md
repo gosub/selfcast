@@ -34,24 +34,26 @@ On first run the LLM and TTS models will be downloaded from Hugging Face automat
 
 ## Usage
 
+There are two modes: **url** (convert a single webpage) and **feed** (batch-process RSS/Atom feeds).
+
+### Single URL mode
+
 ```bash
-uv run main.py <url> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE]
+uv run main.py url <url> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--save-text]
 ```
 
 Examples:
 
 ```bash
 # Basic usage (outputs to output.mp3)
-uv run main.py https://example.com/article
+uv run main.py url https://example.com/article
 
-# Custom output file
-uv run main.py https://example.com/article article.mp3
+# Custom output file and voice
+uv run main.py url https://example.com/article article.mp3 --speaker Vivian --language English
 
-# Choose a different voice and language
-uv run main.py https://example.com/article article.mp3 --speaker Vivian --language English
+# Save intermediate text files for inspection
+uv run main.py url https://example.com/article article.mp3 --save-text
 ```
-
-### Options
 
 | Option | Default | Description |
 |---|---|---|
@@ -59,10 +61,57 @@ uv run main.py https://example.com/article article.mp3 --speaker Vivian --langua
 | `output` | `output.mp3` | Output MP3 file path |
 | `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
 | `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
+| `--save-text` | off | Save raw HTML, trafilatura output, and LLM output as separate files |
+
+### Feed mode
+
+Process new articles from RSS/Atom feeds listed in an OPML file. Each run downloads only unprocessed articles and generates podcast RSS feeds you can subscribe to.
+
+```bash
+uv run main.py feed <opml-file> [--output-dir feeds/] [--speaker SPEAKER] [--language LANGUAGE] [--base-url URL] [--save-text]
+```
+
+Example:
+
+```bash
+uv run main.py feed my-feeds.opml --output-dir feeds/ --speaker Aiden --language English
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `opml_file` | (required) | Path to OPML file listing RSS/Atom feeds |
+| `--output-dir` | `feeds/` | Output directory for generated audio and RSS |
+| `--speaker` | `Aiden` | TTS voice |
+| `--language` | `Auto` | Language for TTS |
+| `--base-url` | (none) | Public URL prefix for podcast enclosure URLs (e.g. `https://myserver.com/feeds/`) |
+| `--save-text` | off | Save intermediate text files for each article |
+
+The feed pipeline runs in three batched phases to stay within 16 GB RAM:
+1. **Discovery** — parse OPML, fetch feeds, download new articles, clean with trafilatura
+2. **LLM extraction** — start llama-server once, process all articles, then shut down
+3. **TTS generation** — load TTS model once, generate audio for all articles
+
+Output structure (entry folders are date-prefixed for chronological sorting):
+
+```
+feeds/
+  state.json                              # tracks processed articles
+  feed.xml                                # root RSS combining all feeds
+  blog-name/
+    feed.xml                              # per-feed podcast RSS
+    2026-02-20-article-title/
+      2026-02-20-article-title.mp3
+    2026-02-22-another-article/
+      2026-02-22-another-article.mp3
+```
+
+Point your podcast app at `feeds/feed.xml` (or a per-feed `feed.xml`) to subscribe. Use `--base-url` to set absolute URLs if serving over HTTP.
 
 ## How it works
 
-The script first uses trafilatura to strip boilerplate from the HTML, drastically reducing the token count so that even large pages (e.g. Wikipedia) fit within the LLM's 32K context window. It then starts a temporary `llama-server` instance to extract article text, and shuts it down to free memory before loading the TTS model. Long texts are automatically split into chunks (~3000 chars each) with "Part X of Y" prefixes and 2-second silence gaps between them. Both models run on Apple MPS (Metal Performance Shaders) for GPU-accelerated inference. The two models are too large to fit in memory simultaneously on 16 GB, hence the sequential approach.
+The script first uses trafilatura to strip boilerplate from the HTML, drastically reducing the token count so that even large pages (e.g. Wikipedia) fit within the LLM's 32K context window. It then starts a temporary `llama-server` instance to generate a spoken preamble ("Selfcast rendering of: Title. By: Author.") and extract article text, and shuts it down to free memory before loading the TTS model. Long texts are automatically split into chunks (~3000 chars each) with "Part X of Y" prefixes and 2-second silence gaps between them. Both models run on Apple MPS (Metal Performance Shaders) for GPU-accelerated inference. The two models are too large to fit in memory simultaneously on 16 GB, hence the sequential approach.
+
+In feed mode, the same pipeline runs in batch: all LLM work happens with the server loaded once, then all TTS work with the model loaded once, making it efficient to process many articles in a single run.
 
 ## Benchmarks
 
