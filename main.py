@@ -244,20 +244,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    html = download_html(args.url)
-    html = clean_html(html)
-    preamble, text = extract_text(html, args.url)
+    raw_html = download_html(args.url)
+    cleaned = clean_html(raw_html)
+    preamble, text = extract_text(cleaned, args.url)
 
     if not text:
         sys.exit("Error: LLM returned empty text.")
 
     if args.save_text:
-        txt_path = os.path.splitext(args.output)[0] + ".txt"
-        with open(txt_path, "w") as f:
-            if preamble:
-                f.write(preamble + "\n\n")
-            f.write(text)
-        print(f"TTS text saved to {txt_path}")
+        base = os.path.splitext(args.output)[0]
+        for suffix, content in [
+            (".1-raw.html", raw_html),
+            (".2-trafilatura.txt", cleaned),
+            (".3-llm.txt", (preamble + "\n\n" + text) if preamble else text),
+        ]:
+            path = base + suffix
+            with open(path, "w") as f:
+                f.write(content)
+            print(f"Saved {path}")
 
     fd, wav_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
