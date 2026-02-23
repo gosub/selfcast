@@ -60,6 +60,8 @@ SPEAKERS = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "O
 
 # Max characters per TTS chunk (~3000 chars ≈ 20-25K tokens for Qwen3-TTS)
 TTS_CHUNK_MAX_CHARS = 3000
+# Max characters per LLM input chunk (~24K chars ≈ safe margin within 32K token context)
+LLM_CHUNK_MAX_CHARS = 24000
 # Seconds of silence between TTS chunks
 SILENCE_BETWEEN_CHUNKS = 2.0
 
@@ -163,6 +165,64 @@ def generate_preamble(text: str, metadata: dict, url: str | None = None) -> str:
     ])
 
 
+def _split_long_text(text: str, max_chars: int) -> list[str]:
+    """Split text into segments each ≤ max_chars using cascading delimiters."""
+    if len(text) <= max_chars:
+        return [text]
+
+    # Try splitting by cascading delimiters: paragraphs, lines, sentences, words
+    for sep in ("\n\n", "\n", ". "):
+        parts = text.split(sep)
+        if len(parts) == 1:
+            continue
+        segments: list[str] = []
+        current = parts[0]
+        for part in parts[1:]:
+            candidate = current + sep + part
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    # Recursively split if a single accumulated segment is still too long
+                    segments.extend(_split_long_text(current, max_chars))
+                current = part
+        if current:
+            segments.extend(_split_long_text(current, max_chars))
+        return segments
+
+    # Last resort: split on word boundaries
+    words = text.split()
+    segments = []
+    current = words[0] if words else ""
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= max_chars:
+            current += " " + word
+        else:
+            if current:
+                segments.append(current)
+            current = word
+    if current:
+        segments.append(current)
+    return segments
+
+
+def llm_clean_text(cleaned: str) -> str:
+    """Send text through the LLM for cleanup, chunking if it exceeds LLM context."""
+    chunks = _split_long_text(cleaned, LLM_CHUNK_MAX_CHARS)
+    if len(chunks) > 1:
+        print(f"Text too long ({len(cleaned):,} chars), splitting into {len(chunks)} LLM chunks")
+    results = []
+    for i, chunk in enumerate(chunks):
+        if len(chunks) > 1:
+            print(f"  LLM chunk {i + 1}/{len(chunks)} ({len(chunk):,} chars) ...")
+        result = llama_query([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": chunk},
+        ])
+        results.append(result)
+    return "\n\n".join(results)
+
+
 def extract_text(cleaned: str, metadata: dict, url: str | None = None) -> tuple[str, str]:
     """Start llama-server, query it for preamble + text extraction, then shut it down."""
     with llama_server():
@@ -170,10 +230,7 @@ def extract_text(cleaned: str, metadata: dict, url: str | None = None) -> tuple[
         print(f"Preamble: {preamble}")
 
         print("Extracting readable text (LLM) ...")
-        text = llama_query([
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": cleaned},
-        ])
+        text = llm_clean_text(cleaned)
         return preamble, text
 
 
@@ -188,13 +245,19 @@ def chunk_text(text: str, max_chars: int = TTS_CHUNK_MAX_CHARS) -> list[str]:
         para = para.strip()
         if not para:
             continue
-        # If adding this paragraph would exceed the limit, flush current chunk
-        if current and current_len + len(para) + 2 > max_chars:
-            chunks.append("\n\n".join(current))
-            current = []
-            current_len = 0
-        current.append(para)
-        current_len += len(para) + 2  # +2 for "\n\n" separator
+        # Break up oversized paragraphs that exceed max_chars on their own
+        if len(para) > max_chars:
+            sub_parts = _split_long_text(para, max_chars)
+        else:
+            sub_parts = [para]
+        for part in sub_parts:
+            # If adding this part would exceed the limit, flush current chunk
+            if current and current_len + len(part) + 2 > max_chars:
+                chunks.append("\n\n".join(current))
+                current = []
+                current_len = 0
+            current.append(part)
+            current_len += len(part) + 2  # +2 for "\n\n" separator
 
     if current:
         chunks.append("\n\n".join(current))
@@ -544,10 +607,7 @@ def feed_main(args) -> None:
                 print(f"Preamble: {item['preamble']}")
 
                 print("Extracting readable text (LLM) ...")
-                item["text"] = llama_query([
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": item["cleaned"]},
-                ])
+                item["text"] = llm_clean_text(item["cleaned"])
             except Exception as e:
                 print(f"  LLM error: {e}")
                 item["text"] = None
