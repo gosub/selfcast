@@ -39,7 +39,9 @@ You generate a short spoken introduction for an audiobook rendering of a webpage
 The user will provide article metadata (title, author, site, URL) and a text snippet. \
 Use the metadata to produce a single line in this exact format:
 Selfcast rendering of: <title>. By: <author>.
-If no author is available, use: From: <website or site name>.
+If the author is missing, uncertain, or looks like a generic/placeholder name \
+(e.g. "admin", "editor", "staff", the site name itself), \
+use: From: <website or site name or domain from the URL>.
 Output ONLY this single line, nothing else."""
 
 LLAMA_SERVER_CMD = [
@@ -143,13 +145,17 @@ def llama_query(messages: list[dict]) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
-def generate_preamble(text: str, metadata: dict) -> str:
+def generate_preamble(text: str, metadata: dict, url: str | None = None) -> str:
     """Ask the LLM to produce a short spoken intro line using metadata."""
     print("Generating preamble (LLM) ...")
     meta_lines = []
-    for key in ("title", "author", "sitename", "url"):
+    for key in ("title", "author", "sitename"):
         if metadata.get(key):
             meta_lines.append(f"{key}: {metadata[key]}")
+    # Always include the original URL (not just trafilatura's)
+    effective_url = url or metadata.get("url")
+    if effective_url:
+        meta_lines.append(f"url: {effective_url}")
     user_content = "\n".join(meta_lines) + "\n\n" + text[:500]
     return llama_query([
         {"role": "system", "content": PREAMBLE_SYSTEM_PROMPT},
@@ -157,10 +163,10 @@ def generate_preamble(text: str, metadata: dict) -> str:
     ])
 
 
-def extract_text(cleaned: str, metadata: dict) -> tuple[str, str]:
+def extract_text(cleaned: str, metadata: dict, url: str | None = None) -> tuple[str, str]:
     """Start llama-server, query it for preamble + text extraction, then shut it down."""
     with llama_server():
-        preamble = generate_preamble(cleaned, metadata)
+        preamble = generate_preamble(cleaned, metadata, url=url)
         print(f"Preamble: {preamble}")
 
         print("Extracting readable text (LLM) ...")
@@ -427,8 +433,7 @@ def generate_root_rss(output_dir: str, state: dict,
 def url_main(args) -> None:
     raw_html = download_html(args.url)
     cleaned, metadata = clean_html(raw_html)
-    metadata.setdefault("url", args.url)
-    preamble, text = extract_text(cleaned, metadata)
+    preamble, text = extract_text(cleaned, metadata, url=args.url)
 
     if not text:
         sys.exit("Error: LLM returned empty text.")
@@ -502,7 +507,6 @@ def feed_main(args) -> None:
             try:
                 raw_html = download_html(entry_link)
                 cleaned, metadata = clean_html(raw_html)
-                metadata.setdefault("url", entry_link)
             except Exception as e:
                 print(f"  Error downloading {entry_link}: {e}")
                 continue
@@ -532,7 +536,8 @@ def feed_main(args) -> None:
         for i, item in enumerate(work_list):
             print(f"\n[{i + 1}/{len(work_list)}] {item['entry_title']}")
             try:
-                item["preamble"] = generate_preamble(item["cleaned"], item["metadata"])
+                item["preamble"] = generate_preamble(item["cleaned"], item["metadata"],
+                                                       url=item["entry_link"])
                 print(f"Preamble: {item['preamble']}")
 
                 print("Extracting readable text (LLM) ...")
