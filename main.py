@@ -440,11 +440,14 @@ def url_main(args) -> None:
 
     if args.save_text:
         base = os.path.splitext(args.output)[0]
-        for suffix, content in [
+        saves = [
             (".1-raw.html", raw_html),
             (".2-trafilatura.txt", cleaned),
-            (".3-llm.txt", (preamble + "\n\n" + text) if preamble else text),
-        ]:
+            (".3-llm.txt", text),
+        ]
+        if preamble:
+            saves.append((".4-preamble.txt", preamble))
+        for suffix, content in saves:
             path = base + suffix
             with open(path, "w") as f:
                 f.write(content)
@@ -567,12 +570,14 @@ def feed_main(args) -> None:
 
         if args.save_text:
             base = os.path.join(item["output_dir"], item["entry_slug"])
-            for suffix, content in [
+            saves = [
                 (".1-raw.html", item["raw_html"]),
                 (".2-trafilatura.txt", item["cleaned"]),
-                (".3-llm.txt", (item["preamble"] + "\n\n" + item["text"])
-                 if item.get("preamble") else item["text"]),
-            ]:
+                (".3-llm.txt", item["text"]),
+            ]
+            if item.get("preamble"):
+                saves.append((".4-preamble.txt", item["preamble"]))
+            for suffix, content in saves:
                 path = base + suffix
                 with open(path, "w") as f:
                     f.write(content)
