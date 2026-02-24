@@ -53,15 +53,25 @@ uv run main.py url https://example.com/article article.mp3 --speaker Vivian --la
 
 # Save intermediate text files for inspection
 uv run main.py url https://example.com/article article.mp3 --save-text
+
+# Resume from a saved trafilatura file (skip download+clean, re-run LLM + TTS)
+uv run main.py url --from-trafilatura article.2-trafilatura.txt article.mp3
+
+# Resume from a saved LLM file (skip download+clean+LLM, run TTS only)
+uv run main.py url --from-llm article.3-llm.txt article.mp3
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `url` | (required) | URL of the webpage to convert |
+| `url` | (required unless `--from-*`) | URL of the webpage to convert |
 | `output` | `output.mp3` | Output MP3 file path |
+| `--from-trafilatura` | (none) | Resume from a trafilatura text file (skip download+clean) |
+| `--from-llm` | (none) | Resume from an LLM-cleaned text file (skip download+clean+LLM) |
 | `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
 | `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
 | `--save-text` | off | Save raw HTML, trafilatura output, and LLM output as separate files |
+
+When using `--from-llm`, the preamble is automatically loaded from a sibling `.4-preamble.txt` file if it exists (e.g. `article.4-preamble.txt` next to `article.3-llm.txt`).
 
 ### Follow mode
 
@@ -134,6 +144,8 @@ Point your podcast app at `feeds/feed.xml` (or a per-feed `feed.xml`) to subscri
 ## How it works
 
 The script first uses trafilatura to strip boilerplate from the HTML, drastically reducing the token count so that even large pages (e.g. Wikipedia) fit within the LLM's 32K context window. It then starts a temporary `llama-server` instance to generate a spoken preamble ("Selfcast rendering of: Title. By: Author.") and extract article text, and shuts it down to free memory before loading the TTS model. Long texts are automatically split into chunks (~3000 chars each) with "Part X of Y" prefixes and 2-second silence gaps between them. Both models run on Apple MPS (Metal Performance Shaders) for GPU-accelerated inference. The two models are too large to fit in memory simultaneously on 16 GB, hence the sequential approach.
+
+TTS chunks are checkpointed to disk as they're generated (in a `.chunks/` directory next to the output file). If a run is interrupted, re-running the same command resumes from the last completed chunk instead of starting over. The checkpoint directory is cleaned up automatically after a successful encode.
 
 In feed mode, the same pipeline runs in batch: all LLM work happens with the server loaded once, then all TTS work with the model loaded once, making it efficient to process many articles in a single run.
 
