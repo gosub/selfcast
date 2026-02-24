@@ -528,6 +528,54 @@ def generate_root_rss(output_dir: str, state: dict,
 
 
 # ---------------------------------------------------------------------------
+# Shared LLM → TTS → MP3 pipeline
+# ---------------------------------------------------------------------------
+
+def _llm_tts_pipeline(cleaned: str, metadata: dict, cp_dir: str,
+                       output: str, speaker: str, language: str,
+                       keep_checkpoints: bool, url: str | None = None) -> None:
+    """Shared LLM → TTS → MP3 pipeline with checkpointing."""
+    # LLM stage
+    llm_path = os.path.join(cp_dir, "3-llm.txt")
+    preamble_path = os.path.join(cp_dir, "4-preamble.txt")
+    if os.path.exists(llm_path):
+        print("Loaded LLM text from checkpoint")
+        with open(llm_path) as f:
+            text = f.read()
+        preamble = None
+        if os.path.exists(preamble_path):
+            with open(preamble_path) as f:
+                preamble = f.read().strip()
+    else:
+        preamble, text = extract_text(cleaned, metadata, url=url)
+        _write_checkpoint(llm_path, text)
+        if preamble:
+            _write_checkpoint(preamble_path, preamble)
+
+    if not text:
+        sys.exit("Error: LLM returned empty text.")
+
+    # TTS + encode + cleanup
+    chunks_dir = os.path.join(cp_dir, "chunks")
+    fd, wav_path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    success = False
+    try:
+        generate_tts(text, speaker, language, wav_path,
+                     preamble=preamble, checkpoint_dir=chunks_dir)
+        encode_mp3(wav_path, output)
+        success = True
+    finally:
+        if os.path.exists(wav_path):
+            os.unlink(wav_path)
+        if success and not keep_checkpoints:
+            shutil.rmtree(cp_dir)
+            print(f"Cleaned up checkpoint dir: {cp_dir}")
+
+    print(f"Done -> {output}")
+
+
+# ---------------------------------------------------------------------------
 # URL mode (single article)
 # ---------------------------------------------------------------------------
 
@@ -555,44 +603,59 @@ def url_main(args) -> None:
         cleaned, metadata = clean_html(raw_html)
         _write_checkpoint(traf_path, cleaned)
 
-    # Stage 3+4: LLM (preamble + text)
-    llm_path = os.path.join(cp_dir, "3-llm.txt")
-    preamble_path = os.path.join(cp_dir, "4-preamble.txt")
-    if os.path.exists(llm_path):
-        print("Loaded LLM text from checkpoint")
-        with open(llm_path) as f:
-            text = f.read()
-        preamble = None
-        if os.path.exists(preamble_path):
-            with open(preamble_path) as f:
-                preamble = f.read().strip()
+    # Stage 3+: LLM → TTS → MP3
+    _llm_tts_pipeline(cleaned, metadata, cp_dir,
+                       args.output, args.speaker, args.language,
+                       args.keep_checkpoints, url=args.url)
+
+
+# ---------------------------------------------------------------------------
+# Text mode (local text file)
+# ---------------------------------------------------------------------------
+
+def text_main(args) -> None:
+    input_path = os.path.abspath(args.input)
+    cp_dir = checkpoint_dir(input_path)
+
+    # Stage 1: read source text (no checkpoint needed — it's a local file)
+    with open(input_path) as f:
+        cleaned = f.read()
+
+    # Stage 2+: LLM → TTS → MP3
+    metadata = {"title": os.path.basename(args.input)}
+    _llm_tts_pipeline(cleaned, metadata, cp_dir,
+                       args.output, args.speaker, args.language,
+                       args.keep_checkpoints)
+
+
+# ---------------------------------------------------------------------------
+# PDF mode (local PDF file)
+# ---------------------------------------------------------------------------
+
+def pdf_main(args) -> None:
+    input_path = os.path.abspath(args.input)
+    cp_dir = checkpoint_dir(input_path)
+
+    # Stage 1: extract text from PDF
+    extracted_path = os.path.join(cp_dir, "1-extracted.txt")
+    if os.path.exists(extracted_path):
+        print("Loaded extracted text from checkpoint")
+        with open(extracted_path) as f:
+            cleaned = f.read()
     else:
-        preamble, text = extract_text(cleaned, metadata, url=args.url)
-        _write_checkpoint(llm_path, text)
-        if preamble:
-            _write_checkpoint(preamble_path, preamble)
+        from pypdf import PdfReader
+        print(f"Extracting text from {args.input} ...")
+        reader = PdfReader(input_path)
+        pages = [page.extract_text() or "" for page in reader.pages]
+        cleaned = "\n\n".join(pages)
+        print(f"Extracted {len(cleaned):,} chars from {len(reader.pages)} pages")
+        _write_checkpoint(extracted_path, cleaned)
 
-    if not text:
-        sys.exit("Error: LLM returned empty text.")
-
-    # Stage 5: TTS
-    chunks_dir = os.path.join(cp_dir, "chunks")
-    fd, wav_path = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
-    success = False
-    try:
-        generate_tts(text, args.speaker, args.language, wav_path,
-                     preamble=preamble, checkpoint_dir=chunks_dir)
-        encode_mp3(wav_path, args.output)
-        success = True
-    finally:
-        if os.path.exists(wav_path):
-            os.unlink(wav_path)
-        if success and not args.keep_checkpoints:
-            shutil.rmtree(cp_dir)
-            print(f"Cleaned up checkpoint dir: {cp_dir}")
-
-    print(f"Done -> {args.output}")
+    # Stage 2+: LLM → TTS → MP3
+    metadata = {"title": os.path.basename(args.input)}
+    _llm_tts_pipeline(cleaned, metadata, cp_dir,
+                       args.output, args.speaker, args.language,
+                       args.keep_checkpoints)
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +929,46 @@ def main() -> None:
         help="Don't delete the checkpoint dir after success (for debugging)"
     )
 
+    # --- text subcommand ---
+    text_parser = subparsers.add_parser("text", help="Convert a local text file to MP3")
+    text_parser.add_argument("input", help="Path to the text file")
+    text_parser.add_argument(
+        "output", nargs="?", default="output.mp3",
+        help="Output MP3 file (default: output.mp3)"
+    )
+    text_parser.add_argument(
+        "--speaker", default="Aiden", choices=SPEAKERS,
+        help="TTS voice speaker (default: Aiden)"
+    )
+    text_parser.add_argument(
+        "--language", default="Auto",
+        help="Language for TTS, e.g. English, Italian, Auto (default: Auto)"
+    )
+    text_parser.add_argument(
+        "--keep-checkpoints", action="store_true",
+        help="Don't delete the checkpoint dir after success (for debugging)"
+    )
+
+    # --- pdf subcommand ---
+    pdf_parser = subparsers.add_parser("pdf", help="Convert a local PDF file to MP3")
+    pdf_parser.add_argument("input", help="Path to the PDF file")
+    pdf_parser.add_argument(
+        "output", nargs="?", default="output.mp3",
+        help="Output MP3 file (default: output.mp3)"
+    )
+    pdf_parser.add_argument(
+        "--speaker", default="Aiden", choices=SPEAKERS,
+        help="TTS voice speaker (default: Aiden)"
+    )
+    pdf_parser.add_argument(
+        "--language", default="Auto",
+        help="Language for TTS, e.g. English, Italian, Auto (default: Auto)"
+    )
+    pdf_parser.add_argument(
+        "--keep-checkpoints", action="store_true",
+        help="Don't delete the checkpoint dir after success (for debugging)"
+    )
+
     # --- feed subcommand ---
     feed_parser = subparsers.add_parser("feed", help="Process new articles from RSS/Atom feeds")
     feed_parser.add_argument("opml_file", help="Path to OPML file listing feeds")
@@ -906,6 +1009,10 @@ def main() -> None:
 
     if args.command == "url":
         url_main(args)
+    elif args.command == "text":
+        text_main(args)
+    elif args.command == "pdf":
+        pdf_main(args)
     elif args.command == "feed":
         feed_main(args)
     elif args.command == "follow":

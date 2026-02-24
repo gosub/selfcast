@@ -1588,6 +1588,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pypdf"
+version = "6.7.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fe/b2/335465d6cff28a772ace8a58beb168f125c2e1d8f7a31527da180f4d89a1/pypdf-6.7.2.tar.gz", hash = "sha256:82a1a48de500ceea59a52a7d979f5095927ef802e4e4fac25ab862a73468acbb", size = 5302986, upload-time = "2026-02-22T11:33:30.776Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/df/38b06d6e74646a4281856920a11efb431559bdeb643bf1e192bff5e29082/pypdf-6.7.2-py3-none-any.whl", hash = "sha256:331b63cd66f63138f152a700565b3e0cebdf4ec8bec3b7594b2522418782f1f3", size = 331245, upload-time = "2026-02-22T11:33:29.204Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -1944,6 +1953,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "feedparser" },
+    { name = "pypdf" },
     { name = "qwen-tts" },
     { name = "soundfile" },
     { name = "trafilatura" },
@@ -1952,6 +1962,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "feedparser", specifier = ">=6.0" },
+    { name = "pypdf", specifier = ">=4.0" },
     { name = "qwen-tts", specifier = ">=0.1.1" },
     { name = "soundfile", specifier = ">=0.13.1" },
     { name = "trafilatura", specifier = ">=1.6.0" },

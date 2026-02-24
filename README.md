@@ -1,11 +1,11 @@
 # selfcast
 
-Convert webpages to audiobooks using fully local LLM and TTS inference. No cloud APIs, no data leaves your machine.
+Convert webpages, text files, and PDFs to audiobooks using fully local LLM and TTS inference. No cloud APIs, no data leaves your machine.
 
 The pipeline:
 
-1. Downloads a webpage
-2. Pre-cleans HTML with [trafilatura](https://github.com/adbar/trafilatura) to strip boilerplate (nav, scripts, styles, footers), reducing tokens by 70-90%
+1. Acquires text — downloads a webpage (url mode), reads a local text file (text mode), or extracts text from a PDF via [pypdf](https://github.com/py-pdf/pypdf) (pdf mode)
+2. Pre-cleans HTML with [trafilatura](https://github.com/adbar/trafilatura) to strip boilerplate (url mode only), reducing tokens by 70-90%
 3. Extracts readable text using a local LLM ([llama.cpp](https://github.com/ggml-org/llama.cpp) + [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF))
 4. Chunks the text for TTS (~3000 chars per chunk) with "Part X of Y" announcements and silence gaps between chunks
 5. Generates speech using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) on Apple MPS
@@ -34,7 +34,7 @@ On first run the LLM and TTS models will be downloaded from Hugging Face automat
 
 ## Usage
 
-There are three subcommands: **url** (convert a single webpage), **follow** (subscribe to a feed), and **feed** (batch-process feeds).
+There are five subcommands: **url** (convert a webpage), **text** (convert a local text file), **pdf** (convert a local PDF), **follow** (subscribe to a feed), and **feed** (batch-process feeds).
 
 ### Single URL mode
 
@@ -58,6 +58,54 @@ uv run main.py url https://example.com/article article.mp3 --keep-checkpoints
 | Option | Default | Description |
 |---|---|---|
 | `url` | (required) | URL of the webpage to convert |
+| `output` | `output.mp3` | Output MP3 file path |
+| `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
+| `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
+| `--keep-checkpoints` | off | Don't delete the checkpoint dir after success (for debugging) |
+
+### Text file mode
+
+```bash
+uv run main.py text <input-file> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints]
+```
+
+Examples:
+
+```bash
+# Basic usage (outputs to output.mp3)
+uv run main.py text article.txt
+
+# Custom output file and voice
+uv run main.py text article.txt renders/article.mp3 --speaker Vivian --language English
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `input` | (required) | Path to the text file |
+| `output` | `output.mp3` | Output MP3 file path |
+| `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
+| `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
+| `--keep-checkpoints` | off | Don't delete the checkpoint dir after success (for debugging) |
+
+### PDF mode
+
+```bash
+uv run main.py pdf <input-file> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints]
+```
+
+Examples:
+
+```bash
+# Basic usage (outputs to output.mp3)
+uv run main.py pdf paper.pdf
+
+# Custom output file
+uv run main.py pdf paper.pdf renders/paper.mp3 --speaker Aiden
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `input` | (required) | Path to the PDF file |
 | `output` | `output.mp3` | Output MP3 file path |
 | `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
 | `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
@@ -133,9 +181,9 @@ Point your podcast app at `feeds/feed.xml` (or a per-feed `feed.xml`) to subscri
 
 ## How it works
 
-The script first uses trafilatura to strip boilerplate from the HTML, drastically reducing the token count so that even large pages (e.g. Wikipedia) fit within the LLM's 32K context window. It then starts a temporary `llama-server` instance to generate a spoken preamble ("Selfcast rendering of: Title. By: Author.") and extract article text, and shuts it down to free memory before loading the TTS model. Long texts are automatically split into chunks (~3000 chars each) with "Part X of Y" prefixes and 2-second silence gaps between them. Both models run on Apple MPS (Metal Performance Shaders) for GPU-accelerated inference. The two models are too large to fit in memory simultaneously on 16 GB, hence the sequential approach.
+In URL mode, the script first uses trafilatura to strip boilerplate from the HTML, drastically reducing the token count so that even large pages (e.g. Wikipedia) fit within the LLM's 32K context window. In text mode, the file is read directly. In PDF mode, text is extracted using pypdf first. All modes then start a temporary `llama-server` instance to generate a spoken preamble ("Selfcast rendering of: Title. By: Author.") and extract article text, and shut it down to free memory before loading the TTS model. Long texts are automatically split into chunks (~3000 chars each) with "Part X of Y" prefixes and 2-second silence gaps between them. Both models run on Apple MPS (Metal Performance Shaders) for GPU-accelerated inference. The two models are too large to fit in memory simultaneously on 16 GB, hence the sequential approach.
 
-Every pipeline stage is automatically checkpointed to `.selfcast-cache/<hash>/` (where `<hash>` is derived from the input URL). If a run is interrupted at any point — during download, LLM processing, or TTS generation — re-running the same command resumes from the last completed stage instead of starting over. Checkpoint directories are cleaned up automatically after a successful encode; use `--keep-checkpoints` to retain them for debugging.
+Every pipeline stage is automatically checkpointed to `.selfcast-cache/<hash>/` (where `<hash>` is derived from the input URL or file path). If a run is interrupted at any point — during download, LLM processing, or TTS generation — re-running the same command resumes from the last completed stage instead of starting over. Checkpoint directories are cleaned up automatically after a successful encode; use `--keep-checkpoints` to retain them for debugging.
 
 In feed mode, the same pipeline runs in batch: all LLM work happens with the server loaded once, then all TTS work with the model loaded once, making it efficient to process many articles in a single run. Each article gets its own checkpoint directory keyed by its link URL.
 
