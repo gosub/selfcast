@@ -4,6 +4,7 @@ import re
 import argparse
 import contextlib
 import json
+import shutil
 import subprocess
 import tempfile
 import time
@@ -282,43 +283,61 @@ def load_tts_model():
 
 
 def generate_tts(text: str, speaker: str, language: str, wav_path: str,
-                  preamble: str | None = None, model=None) -> None:
+                  preamble: str | None = None, model=None,
+                  checkpoint_dir: str | None = None) -> None:
     if model is None:
         model = load_tts_model()
 
     chunks = chunk_text(text)
-    print(f"TTS: {len(chunks)} chunk(s) to generate")
+    total_items = len(chunks) + (1 if preamble else 0)
+    print(f"TTS: {total_items} chunk(s) to generate" +
+          (" (including preamble)" if preamble else ""))
+
+    if checkpoint_dir:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+    def _chunk_path(idx: int) -> str | None:
+        if not checkpoint_dir:
+            return None
+        return os.path.join(checkpoint_dir, f"chunk-{idx:03d}.wav")
 
     all_audio: list[np.ndarray] = []
     sr = None
-
     tts_start = time.monotonic()
+    chunk_idx = 0
+
+    def _process_chunk(label: str, tts_text: str) -> None:
+        nonlocal sr, chunk_idx
+        cp = _chunk_path(chunk_idx)
+        if cp and os.path.exists(cp):
+            print(f"  {label}: loaded from checkpoint")
+            audio, chunk_sr = sf.read(cp, dtype="float32")
+        else:
+            print(f"  {label} ...")
+            wavs, chunk_sr = model.generate_custom_voice(
+                text=tts_text, language=language, speaker=speaker,
+            )
+            audio = wavs[0]
+            if cp:
+                sf.write(cp, audio, chunk_sr)
+        if sr is None:
+            sr = chunk_sr
+        all_audio.append(audio)
+        chunk_idx += 1
 
     # Generate preamble as chunk 0
     if preamble:
-        print(f"  Generating preamble ({len(preamble)} chars) ...")
-        wavs, chunk_sr = model.generate_custom_voice(
-            text=preamble, language=language, speaker=speaker,
-        )
-        if sr is None:
-            sr = chunk_sr
-        all_audio.append(wavs[0])
+        _process_chunk(f"Generating preamble ({len(preamble)} chars)", preamble)
         silence_samples = int(sr * SILENCE_BETWEEN_CHUNKS)
-        all_audio.append(np.zeros(silence_samples, dtype=wavs[0].dtype))
+        all_audio.append(np.zeros(silence_samples, dtype=np.float32))
 
     for i, chunk in enumerate(chunks):
-        print(f"  Generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars) ...")
-        wavs, chunk_sr = model.generate_custom_voice(
-            text=chunk, language=language, speaker=speaker,
-        )
-        if sr is None:
-            sr = chunk_sr
-        all_audio.append(wavs[0])
-
+        _process_chunk(
+            f"Generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)", chunk)
         # Insert silence between chunks (not after the last one)
         if i < len(chunks) - 1:
             silence_samples = int(sr * SILENCE_BETWEEN_CHUNKS)
-            all_audio.append(np.zeros(silence_samples, dtype=wavs[0].dtype))
+            all_audio.append(np.zeros(silence_samples, dtype=np.float32))
 
     tts_elapsed = time.monotonic() - tts_start
     combined = np.concatenate(all_audio)
@@ -494,20 +513,47 @@ def generate_root_rss(output_dir: str, state: dict,
 # ---------------------------------------------------------------------------
 
 def url_main(args) -> None:
-    raw_html = download_html(args.url)
-    cleaned, metadata = clean_html(raw_html)
-    preamble, text = extract_text(cleaned, metadata, url=args.url)
+    if args.from_llm and args.from_trafilatura:
+        sys.exit("Error: --from-llm and --from-trafilatura are mutually exclusive.")
+    if not args.url and not args.from_llm and not args.from_trafilatura:
+        sys.exit("Error: url is required unless --from-llm or --from-trafilatura is set.")
+
+    raw_html = None
+    if args.from_llm:
+        with open(args.from_llm) as f:
+            text = f.read()
+        # Try to load sibling preamble file
+        base_path = os.path.splitext(args.from_llm)[0]
+        # Strip the ".3-llm" part to get the actual base
+        if base_path.endswith(".3-llm"):
+            base_path = base_path[:-len(".3-llm")]
+        preamble_path = base_path + ".4-preamble.txt"
+        if os.path.exists(preamble_path):
+            with open(preamble_path) as f:
+                preamble = f.read().strip()
+            print(f"Loaded preamble from {preamble_path}")
+        else:
+            preamble = None
+    elif args.from_trafilatura:
+        with open(args.from_trafilatura) as f:
+            cleaned = f.read()
+        metadata = {}
+        preamble, text = extract_text(cleaned, metadata)
+    else:
+        raw_html = download_html(args.url)
+        cleaned, metadata = clean_html(raw_html)
+        preamble, text = extract_text(cleaned, metadata, url=args.url)
 
     if not text:
         sys.exit("Error: LLM returned empty text.")
 
-    if args.save_text:
+    if args.save_text and not args.from_llm:
         base = os.path.splitext(args.output)[0]
-        saves = [
-            (".1-raw.html", raw_html),
-            (".2-trafilatura.txt", cleaned),
-            (".3-llm.txt", text),
-        ]
+        saves = []
+        if raw_html is not None:
+            saves.append((".1-raw.html", raw_html))
+            saves.append((".2-trafilatura.txt", cleaned))
+        saves.append((".3-llm.txt", text))
         if preamble:
             saves.append((".4-preamble.txt", preamble))
         for suffix, content in saves:
@@ -516,16 +562,21 @@ def url_main(args) -> None:
                 f.write(content)
             print(f"Saved {path}")
 
+    checkpoint_dir = os.path.splitext(args.output)[0] + ".chunks"
     fd, wav_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     success = False
     try:
-        generate_tts(text, args.speaker, args.language, wav_path, preamble=preamble)
+        generate_tts(text, args.speaker, args.language, wav_path,
+                     preamble=preamble, checkpoint_dir=checkpoint_dir)
         encode_mp3(wav_path, args.output)
         success = True
     finally:
         if success and os.path.exists(wav_path):
             os.unlink(wav_path)
+        if success and os.path.exists(checkpoint_dir):
+            shutil.rmtree(checkpoint_dir)
+            print(f"Cleaned up checkpoint dir: {checkpoint_dir}")
 
     print(f"Done -> {args.output}")
 
@@ -743,7 +794,16 @@ def main() -> None:
 
     # --- url subcommand ---
     url_parser = subparsers.add_parser("url", help="Convert a single URL to MP3")
-    url_parser.add_argument("url", help="URL of the webpage to convert")
+    url_parser.add_argument("url", nargs="?", default=None,
+                            help="URL of the webpage to convert")
+    url_parser.add_argument(
+        "--from-trafilatura", metavar="FILE", default=None,
+        help="Resume from a trafilatura text file (skip download+clean)"
+    )
+    url_parser.add_argument(
+        "--from-llm", metavar="FILE", default=None,
+        help="Resume from an LLM-cleaned text file (skip download+clean+LLM)"
+    )
     url_parser.add_argument(
         "output", nargs="?", default="output.mp3",
         help="Output MP3 file (default: output.mp3)"
