@@ -576,6 +576,30 @@ def _llm_tts_pipeline(cleaned: str, metadata: dict, cp_dir: str,
 
 
 # ---------------------------------------------------------------------------
+# One-shot feed helper
+# ---------------------------------------------------------------------------
+
+def _add_to_feed(mp3_path: str, title: str, key: str,
+                  feed_dir: str, link: str | None = None) -> None:
+    """Add an MP3 to the one-shot podcast feed."""
+    state_path = os.path.join(feed_dir, "state.json")
+    os.makedirs(feed_dir, exist_ok=True)
+    state = load_state(state_path)
+    state.setdefault("processed", {})[key] = {
+        "feed": "One-shot",
+        "feed_slug": "one-shot",
+        "title": title,
+        "slug": slugify(title),
+        "link": link or "",
+        "mp3": mp3_path,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    save_state(state_path, state)
+    generate_root_rss(feed_dir, state)
+    print(f"Added to feed: {feed_dir}/feed.xml")
+
+
+# ---------------------------------------------------------------------------
 # URL mode (single article)
 # ---------------------------------------------------------------------------
 
@@ -603,10 +627,24 @@ def url_main(args) -> None:
         cleaned, metadata = clean_html(raw_html)
         _write_checkpoint(traf_path, cleaned)
 
+    # Determine output path
+    title = metadata.get("title") or os.path.basename(args.url)
+    if args.add_to_feed:
+        slug = slugify(title)
+        one_shot_dir = os.path.join(args.add_to_feed, "one-shot")
+        os.makedirs(one_shot_dir, exist_ok=True)
+        output = os.path.join(one_shot_dir, f"{slug}.mp3")
+    else:
+        output = args.output
+
     # Stage 3+: LLM → TTS → MP3
     _llm_tts_pipeline(cleaned, metadata, cp_dir,
-                       args.output, args.speaker, args.language,
+                       output, args.speaker, args.language,
                        args.keep_checkpoints, url=args.url)
+
+    if args.add_to_feed:
+        _add_to_feed(output, title, args.url, args.add_to_feed,
+                      link=args.url)
 
 
 # ---------------------------------------------------------------------------
@@ -621,11 +659,24 @@ def text_main(args) -> None:
     with open(input_path) as f:
         cleaned = f.read()
 
+    # Determine output path
+    title = os.path.splitext(os.path.basename(args.input))[0]
+    metadata = {"title": title}
+    if args.add_to_feed:
+        slug = slugify(title)
+        one_shot_dir = os.path.join(args.add_to_feed, "one-shot")
+        os.makedirs(one_shot_dir, exist_ok=True)
+        output = os.path.join(one_shot_dir, f"{slug}.mp3")
+    else:
+        output = args.output
+
     # Stage 2+: LLM → TTS → MP3
-    metadata = {"title": os.path.basename(args.input)}
     _llm_tts_pipeline(cleaned, metadata, cp_dir,
-                       args.output, args.speaker, args.language,
+                       output, args.speaker, args.language,
                        args.keep_checkpoints)
+
+    if args.add_to_feed:
+        _add_to_feed(output, title, input_path, args.add_to_feed)
 
 
 # ---------------------------------------------------------------------------
@@ -651,11 +702,24 @@ def pdf_main(args) -> None:
         print(f"Extracted {len(cleaned):,} chars from {len(reader.pages)} pages")
         _write_checkpoint(extracted_path, cleaned)
 
+    # Determine output path
+    title = os.path.splitext(os.path.basename(args.input))[0]
+    metadata = {"title": title}
+    if args.add_to_feed:
+        slug = slugify(title)
+        one_shot_dir = os.path.join(args.add_to_feed, "one-shot")
+        os.makedirs(one_shot_dir, exist_ok=True)
+        output = os.path.join(one_shot_dir, f"{slug}.mp3")
+    else:
+        output = args.output
+
     # Stage 2+: LLM → TTS → MP3
-    metadata = {"title": os.path.basename(args.input)}
     _llm_tts_pipeline(cleaned, metadata, cp_dir,
-                       args.output, args.speaker, args.language,
+                       output, args.speaker, args.language,
                        args.keep_checkpoints)
+
+    if args.add_to_feed:
+        _add_to_feed(output, title, input_path, args.add_to_feed)
 
 
 # ---------------------------------------------------------------------------
@@ -928,6 +992,11 @@ def main() -> None:
         "--keep-checkpoints", action="store_true",
         help="Don't delete the checkpoint dir after success (for debugging)"
     )
+    url_parser.add_argument(
+        "--add-to-feed", nargs="?", const="feeds", default=None,
+        metavar="DIR",
+        help="Add the rendered MP3 to a podcast feed in DIR (default: feeds/)"
+    )
 
     # --- text subcommand ---
     text_parser = subparsers.add_parser("text", help="Convert a local text file to MP3")
@@ -948,6 +1017,11 @@ def main() -> None:
         "--keep-checkpoints", action="store_true",
         help="Don't delete the checkpoint dir after success (for debugging)"
     )
+    text_parser.add_argument(
+        "--add-to-feed", nargs="?", const="feeds", default=None,
+        metavar="DIR",
+        help="Add the rendered MP3 to a podcast feed in DIR (default: feeds/)"
+    )
 
     # --- pdf subcommand ---
     pdf_parser = subparsers.add_parser("pdf", help="Convert a local PDF file to MP3")
@@ -967,6 +1041,11 @@ def main() -> None:
     pdf_parser.add_argument(
         "--keep-checkpoints", action="store_true",
         help="Don't delete the checkpoint dir after success (for debugging)"
+    )
+    pdf_parser.add_argument(
+        "--add-to-feed", nargs="?", const="feeds", default=None,
+        metavar="DIR",
+        help="Add the rendered MP3 to a podcast feed in DIR (default: feeds/)"
     )
 
     # --- feed subcommand ---

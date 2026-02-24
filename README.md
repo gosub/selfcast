@@ -39,7 +39,7 @@ There are five subcommands: **url** (convert a webpage), **text** (convert a loc
 ### Single URL mode
 
 ```bash
-uv run main.py url <url> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints]
+uv run main.py url <url> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints] [--add-to-feed [DIR]]
 ```
 
 Examples:
@@ -53,6 +53,9 @@ uv run main.py url https://example.com/article article.mp3 --speaker Vivian --la
 
 # Keep checkpoint files for debugging
 uv run main.py url https://example.com/article article.mp3 --keep-checkpoints
+
+# Add to podcast feed (MP3 goes to feeds/one-shot/<slug>.mp3)
+uv run main.py url https://example.com/article --add-to-feed
 ```
 
 | Option | Default | Description |
@@ -62,11 +65,12 @@ uv run main.py url https://example.com/article article.mp3 --keep-checkpoints
 | `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
 | `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
 | `--keep-checkpoints` | off | Don't delete the checkpoint dir after success (for debugging) |
+| `--add-to-feed` | off | Add the rendered MP3 to a podcast feed in DIR (default: `feeds/`) |
 
 ### Text file mode
 
 ```bash
-uv run main.py text <input-file> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints]
+uv run main.py text <input-file> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints] [--add-to-feed [DIR]]
 ```
 
 Examples:
@@ -77,6 +81,9 @@ uv run main.py text article.txt
 
 # Custom output file and voice
 uv run main.py text article.txt renders/article.mp3 --speaker Vivian --language English
+
+# Add to podcast feed in a custom directory
+uv run main.py text article.txt --add-to-feed myfeeds
 ```
 
 | Option | Default | Description |
@@ -86,11 +93,12 @@ uv run main.py text article.txt renders/article.mp3 --speaker Vivian --language 
 | `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
 | `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
 | `--keep-checkpoints` | off | Don't delete the checkpoint dir after success (for debugging) |
+| `--add-to-feed` | off | Add the rendered MP3 to a podcast feed in DIR (default: `feeds/`) |
 
 ### PDF mode
 
 ```bash
-uv run main.py pdf <input-file> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints]
+uv run main.py pdf <input-file> [output.mp3] [--speaker SPEAKER] [--language LANGUAGE] [--keep-checkpoints] [--add-to-feed [DIR]]
 ```
 
 Examples:
@@ -101,6 +109,9 @@ uv run main.py pdf paper.pdf
 
 # Custom output file
 uv run main.py pdf paper.pdf renders/paper.mp3 --speaker Aiden
+
+# Add to podcast feed
+uv run main.py pdf paper.pdf --add-to-feed
 ```
 
 | Option | Default | Description |
@@ -110,6 +121,7 @@ uv run main.py pdf paper.pdf renders/paper.mp3 --speaker Aiden
 | `--speaker` | `Aiden` | TTS voice: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee |
 | `--language` | `Auto` | Language: Auto, English, Italian, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish |
 | `--keep-checkpoints` | off | Don't delete the checkpoint dir after success (for debugging) |
+| `--add-to-feed` | off | Add the rendered MP3 to a podcast feed in DIR (default: `feeds/`) |
 
 ### Follow mode
 
@@ -178,6 +190,10 @@ feeds/
 ```
 
 Point your podcast app at `feeds/feed.xml` (or a per-feed `feed.xml`) to subscribe. Use `--base-url` to set absolute URLs if serving over HTTP.
+
+### Adding one-shots to a feed
+
+The `url`, `text`, and `pdf` commands support `--add-to-feed [DIR]` to collect one-shot renders into the same feed infrastructure used by feed mode. When used, the MP3 is placed in `<DIR>/one-shot/<slug>.mp3` and the entry is added to `<DIR>/state.json` and `<DIR>/feed.xml`. This lets you subscribe to one-shot renders via a podcast app alongside your feed-mode content. The default directory is `feeds/`.
 
 ## How it works
 
