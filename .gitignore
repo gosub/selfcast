@@ -15,3 +15,6 @@ wheels/
 # Rendered audio/text output
 renders/
 feeds/
+
+# Pipeline checkpoints
+.selfcast-cache/

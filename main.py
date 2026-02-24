@@ -3,6 +3,7 @@ import os
 import re
 import argparse
 import contextlib
+import hashlib
 import json
 import shutil
 import subprocess
@@ -65,6 +66,24 @@ TTS_CHUNK_MAX_CHARS = 3000
 LLM_CHUNK_MAX_CHARS = 24000
 # Seconds of silence between TTS chunks
 SILENCE_BETWEEN_CHUNKS = 2.0
+
+
+# ---------------------------------------------------------------------------
+# Checkpointing helpers
+# ---------------------------------------------------------------------------
+
+def checkpoint_dir(key: str) -> str:
+    """Return checkpoint directory for a given key (URL, entry link, etc.)."""
+    h = hashlib.sha256(key.encode()).hexdigest()[:12]
+    d = os.path.join(".selfcast-cache", h)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _write_checkpoint(path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
 
 
 # ---------------------------------------------------------------------------
@@ -513,70 +532,65 @@ def generate_root_rss(output_dir: str, state: dict,
 # ---------------------------------------------------------------------------
 
 def url_main(args) -> None:
-    if args.from_llm and args.from_trafilatura:
-        sys.exit("Error: --from-llm and --from-trafilatura are mutually exclusive.")
-    if not args.url and not args.from_llm and not args.from_trafilatura:
-        sys.exit("Error: url is required unless --from-llm or --from-trafilatura is set.")
+    cp_dir = checkpoint_dir(args.url)
 
-    raw_html = None
-    if args.from_llm:
-        with open(args.from_llm) as f:
+    # Stage 1: download
+    raw_path = os.path.join(cp_dir, "1-raw.html")
+    if os.path.exists(raw_path):
+        print("Loaded raw HTML from checkpoint")
+        with open(raw_path) as f:
+            raw_html = f.read()
+    else:
+        raw_html = download_html(args.url)
+        _write_checkpoint(raw_path, raw_html)
+
+    # Stage 2: trafilatura
+    traf_path = os.path.join(cp_dir, "2-trafilatura.txt")
+    if os.path.exists(traf_path):
+        print("Loaded trafilatura text from checkpoint")
+        with open(traf_path) as f:
+            cleaned = f.read()
+        metadata = {}  # not available from checkpoint
+    else:
+        cleaned, metadata = clean_html(raw_html)
+        _write_checkpoint(traf_path, cleaned)
+
+    # Stage 3+4: LLM (preamble + text)
+    llm_path = os.path.join(cp_dir, "3-llm.txt")
+    preamble_path = os.path.join(cp_dir, "4-preamble.txt")
+    if os.path.exists(llm_path):
+        print("Loaded LLM text from checkpoint")
+        with open(llm_path) as f:
             text = f.read()
-        # Try to load sibling preamble file
-        base_path = os.path.splitext(args.from_llm)[0]
-        # Strip the ".3-llm" part to get the actual base
-        if base_path.endswith(".3-llm"):
-            base_path = base_path[:-len(".3-llm")]
-        preamble_path = base_path + ".4-preamble.txt"
+        preamble = None
         if os.path.exists(preamble_path):
             with open(preamble_path) as f:
                 preamble = f.read().strip()
-            print(f"Loaded preamble from {preamble_path}")
-        else:
-            preamble = None
-    elif args.from_trafilatura:
-        with open(args.from_trafilatura) as f:
-            cleaned = f.read()
-        metadata = {}
-        preamble, text = extract_text(cleaned, metadata)
     else:
-        raw_html = download_html(args.url)
-        cleaned, metadata = clean_html(raw_html)
         preamble, text = extract_text(cleaned, metadata, url=args.url)
+        _write_checkpoint(llm_path, text)
+        if preamble:
+            _write_checkpoint(preamble_path, preamble)
 
     if not text:
         sys.exit("Error: LLM returned empty text.")
 
-    if args.save_text and not args.from_llm:
-        base = os.path.splitext(args.output)[0]
-        saves = []
-        if raw_html is not None:
-            saves.append((".1-raw.html", raw_html))
-            saves.append((".2-trafilatura.txt", cleaned))
-        saves.append((".3-llm.txt", text))
-        if preamble:
-            saves.append((".4-preamble.txt", preamble))
-        for suffix, content in saves:
-            path = base + suffix
-            with open(path, "w") as f:
-                f.write(content)
-            print(f"Saved {path}")
-
-    checkpoint_dir = os.path.splitext(args.output)[0] + ".chunks"
+    # Stage 5: TTS
+    chunks_dir = os.path.join(cp_dir, "chunks")
     fd, wav_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     success = False
     try:
         generate_tts(text, args.speaker, args.language, wav_path,
-                     preamble=preamble, checkpoint_dir=checkpoint_dir)
+                     preamble=preamble, checkpoint_dir=chunks_dir)
         encode_mp3(wav_path, args.output)
         success = True
     finally:
-        if success and os.path.exists(wav_path):
+        if os.path.exists(wav_path):
             os.unlink(wav_path)
-        if success and os.path.exists(checkpoint_dir):
-            shutil.rmtree(checkpoint_dir)
-            print(f"Cleaned up checkpoint dir: {checkpoint_dir}")
+        if success and not args.keep_checkpoints:
+            shutil.rmtree(cp_dir)
+            print(f"Cleaned up checkpoint dir: {cp_dir}")
 
     print(f"Done -> {args.output}")
 
@@ -595,7 +609,7 @@ def feed_main(args) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     state = load_state(state_path)
 
-    # Phase 1: Discovery
+    # Phase 1: Discovery (with checkpointing for download + trafilatura)
     print("\n=== Phase 1: Discovery ===")
     work_list = []
     for feed_info in feeds:
@@ -620,13 +634,34 @@ def feed_main(args) -> None:
             entry_slug = f"{date_prefix}-{slugify(entry_title)}"
             output_dir = os.path.join(args.output_dir, feed_slug, entry_slug)
 
+            cp_dir = checkpoint_dir(entry_link)
+
             print(f"  New: {entry_title}")
-            try:
-                raw_html = download_html(entry_link)
+
+            # Stage 1: download (checkpointed)
+            raw_path = os.path.join(cp_dir, "1-raw.html")
+            if os.path.exists(raw_path):
+                print(f"    Loaded raw HTML from checkpoint")
+                with open(raw_path) as f:
+                    raw_html = f.read()
+            else:
+                try:
+                    raw_html = download_html(entry_link)
+                    _write_checkpoint(raw_path, raw_html)
+                except Exception as e:
+                    print(f"  Error downloading {entry_link}: {e}")
+                    continue
+
+            # Stage 2: trafilatura (checkpointed)
+            traf_path = os.path.join(cp_dir, "2-trafilatura.txt")
+            if os.path.exists(traf_path):
+                print(f"    Loaded trafilatura text from checkpoint")
+                with open(traf_path) as f:
+                    cleaned = f.read()
+                metadata = {}
+            else:
                 cleaned, metadata = clean_html(raw_html)
-            except Exception as e:
-                print(f"  Error downloading {entry_link}: {e}")
-                continue
+                _write_checkpoint(traf_path, cleaned)
 
             work_list.append({
                 "entry_key": entry_key,
@@ -635,10 +670,10 @@ def feed_main(args) -> None:
                 "entry_title": entry_title,
                 "entry_slug": entry_slug,
                 "entry_link": entry_link,
-                "raw_html": raw_html,
                 "cleaned": cleaned,
                 "metadata": metadata,
                 "output_dir": output_dir,
+                "cp_dir": cp_dir,
             })
 
     if not work_list:
@@ -647,21 +682,47 @@ def feed_main(args) -> None:
 
     print(f"\n{len(work_list)} new article(s) to process.")
 
-    # Phase 2: LLM extraction (server loaded once)
+    # Phase 2: LLM extraction (server loaded once, with checkpointing)
     print("\n=== Phase 2: LLM extraction ===")
-    with llama_server():
+    need_llm = any(
+        not os.path.exists(os.path.join(item["cp_dir"], "3-llm.txt"))
+        for item in work_list
+    )
+    if need_llm:
+        ctx = llama_server()
+    else:
+        ctx = contextlib.nullcontext()
+
+    with ctx:
         for i, item in enumerate(work_list):
             print(f"\n[{i + 1}/{len(work_list)}] {item['entry_title']}")
-            try:
-                item["preamble"] = generate_preamble(item["cleaned"], item["metadata"],
-                                                       url=item["entry_link"])
-                print(f"Preamble: {item['preamble']}")
+            cp_dir = item["cp_dir"]
+            llm_path = os.path.join(cp_dir, "3-llm.txt")
+            preamble_path = os.path.join(cp_dir, "4-preamble.txt")
 
-                print("Extracting readable text (LLM) ...")
-                item["text"] = llm_clean_text(item["cleaned"])
-            except Exception as e:
-                print(f"  LLM error: {e}")
-                item["text"] = None
+            if os.path.exists(llm_path):
+                print("  Loaded LLM text from checkpoint")
+                with open(llm_path) as f:
+                    item["text"] = f.read()
+                item["preamble"] = None
+                if os.path.exists(preamble_path):
+                    with open(preamble_path) as f:
+                        item["preamble"] = f.read().strip()
+            else:
+                try:
+                    item["preamble"] = generate_preamble(
+                        item["cleaned"], item["metadata"],
+                        url=item["entry_link"])
+                    print(f"  Preamble: {item['preamble']}")
+
+                    print("  Extracting readable text (LLM) ...")
+                    item["text"] = llm_clean_text(item["cleaned"])
+                    _write_checkpoint(llm_path, item["text"])
+                    if item["preamble"]:
+                        _write_checkpoint(preamble_path, item["preamble"])
+                except Exception as e:
+                    print(f"  LLM error: {e}")
+                    item["text"] = None
 
     # Remove items that failed LLM extraction
     work_list = [item for item in work_list if item.get("text")]
@@ -670,7 +731,7 @@ def feed_main(args) -> None:
         print("\nAll articles failed LLM extraction.")
         return
 
-    # Phase 3: TTS generation (model loaded once)
+    # Phase 3: TTS generation (model loaded once, with checkpointing)
     print("\n=== Phase 3: TTS generation ===")
     model = load_tts_model()
 
@@ -678,21 +739,7 @@ def feed_main(args) -> None:
         print(f"\n[{i + 1}/{len(work_list)}] {item['entry_title']}")
         os.makedirs(item["output_dir"], exist_ok=True)
         mp3_path = os.path.join(item["output_dir"], item["entry_slug"] + ".mp3")
-
-        if args.save_text:
-            base = os.path.join(item["output_dir"], item["entry_slug"])
-            saves = [
-                (".1-raw.html", item["raw_html"]),
-                (".2-trafilatura.txt", item["cleaned"]),
-                (".3-llm.txt", item["text"]),
-            ]
-            if item.get("preamble"):
-                saves.append((".4-preamble.txt", item["preamble"]))
-            for suffix, content in saves:
-                path = base + suffix
-                with open(path, "w") as f:
-                    f.write(content)
-                print(f"Saved {path}")
+        chunks_dir = os.path.join(item["cp_dir"], "chunks")
 
         fd, wav_path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
@@ -700,6 +747,7 @@ def feed_main(args) -> None:
             generate_tts(
                 item["text"], args.speaker, args.language, wav_path,
                 preamble=item.get("preamble"), model=model,
+                checkpoint_dir=chunks_dir,
             )
             encode_mp3(wav_path, mp3_path)
         except Exception as e:
@@ -720,6 +768,12 @@ def feed_main(args) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         save_state(state_path, state)
+
+        # Clean up checkpoint dir for this article
+        if not args.keep_checkpoints:
+            shutil.rmtree(item["cp_dir"])
+            print(f"  Cleaned up checkpoint dir: {item['cp_dir']}")
+
         print(f"Done -> {mp3_path}")
 
     # Generate per-feed RSS and root RSS
@@ -794,16 +848,7 @@ def main() -> None:
 
     # --- url subcommand ---
     url_parser = subparsers.add_parser("url", help="Convert a single URL to MP3")
-    url_parser.add_argument("url", nargs="?", default=None,
-                            help="URL of the webpage to convert")
-    url_parser.add_argument(
-        "--from-trafilatura", metavar="FILE", default=None,
-        help="Resume from a trafilatura text file (skip download+clean)"
-    )
-    url_parser.add_argument(
-        "--from-llm", metavar="FILE", default=None,
-        help="Resume from an LLM-cleaned text file (skip download+clean+LLM)"
-    )
+    url_parser.add_argument("url", help="URL of the webpage to convert")
     url_parser.add_argument(
         "output", nargs="?", default="output.mp3",
         help="Output MP3 file (default: output.mp3)"
@@ -817,8 +862,8 @@ def main() -> None:
         help="Language for TTS, e.g. English, Italian, Auto (default: Auto)"
     )
     url_parser.add_argument(
-        "--save-text", action="store_true",
-        help="Save pipeline intermediate text files alongside the output"
+        "--keep-checkpoints", action="store_true",
+        help="Don't delete the checkpoint dir after success (for debugging)"
     )
 
     # --- feed subcommand ---
@@ -841,8 +886,8 @@ def main() -> None:
         help="Public URL prefix for podcast enclosure URLs"
     )
     feed_parser.add_argument(
-        "--save-text", action="store_true",
-        help="Save pipeline intermediate text files for each article"
+        "--keep-checkpoints", action="store_true",
+        help="Don't delete checkpoint dirs after success (for debugging)"
     )
 
     # --- follow subcommand ---
